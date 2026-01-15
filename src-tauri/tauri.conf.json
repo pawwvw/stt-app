@@ -25,7 +25,7 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["deb", "nsis", "msi"],
+    "targets": ["deb", "nsis"],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -33,9 +33,10 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
-    "resources": {
-      "whisher/whisper-cli": "./",
-      "whisher/models/ggml-tiny.bin": "./"
-    }
+    "resources": [
+      "whisher/whisper-cli",
+      "whisher/whisper-cli.exe",
+      "whisher/models/ggml-tiny.bin"
+    ]
   }
 }

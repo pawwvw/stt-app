@@ -26,38 +26,31 @@ async fn transcribe_audio(file_path: String, app_handle: tauri::AppHandle) -> Re
         });
     }
 
-    let base_path = if cfg!(debug_assertions) {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("whisher")
-    } else {
-        let resource_dir = app_handle.path().resource_dir()
-            .map_err(|e| format!("Не удалось найти директорию ресурсов: {}", e))?;
-        
-        let whisher_path = resource_dir.join("whisher");
-        if whisher_path.exists() {
-            whisher_path
-        } else {
-            resource_dir
-        }
-    };
-    
-    if !base_path.exists() {
-        return Ok(TranscriptionResult {
-            text: String::new(),
-            success: false,
-            error: Some(format!("Директория whisher не найдена по пути: {:?}. Resource dir: {:?}", 
-                base_path, 
-                app_handle.path().resource_dir().ok())),
-        });
-    }
-    
     let whisper_cli_name = if cfg!(target_os = "windows") {
         "whisper-cli.exe"
     } else {
         "whisper-cli"
     };
     
-    let whisper_cli_path = base_path.join(whisper_cli_name);
-    let model_path = base_path.join("models").join("ggml-tiny.bin");
+    let (whisper_cli_path, model_path) = if cfg!(debug_assertions) {
+        let base = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("whisher");
+        (base.join(whisper_cli_name), base.join("models").join("ggml-tiny.bin"))
+    } else {
+        let resource_dir = app_handle.path().resource_dir()
+            .map_err(|e| format!("Не удалось найти директорию ресурсов: {}", e))?;
+        
+        let cli_path = resource_dir.join(whisper_cli_name);
+        let model_path_option1 = resource_dir.join("models").join("ggml-tiny.bin");
+        let model_path_option2 = resource_dir.join("ggml-tiny.bin");
+        
+        let final_model = if model_path_option1.exists() {
+            model_path_option1
+        } else {
+            model_path_option2
+        };
+        
+        (cli_path, final_model)
+    };
     
     if !whisper_cli_path.exists() {
         return Ok(TranscriptionResult {
