@@ -33,10 +33,6 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
-    "resources": [
-      "whisher/whisper-cli",
-      "whisher/whisper-cli.exe",
-      "whisher/models/ggml-tiny.bin"
-    ]
+    "resources": []
   }
 }
