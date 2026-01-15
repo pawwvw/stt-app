@@ -45,7 +45,7 @@ jobs:
           cmake -B build
           cmake --build build -j$(nproc)
           mkdir -p ../src-tauri/whisher
-          cp build/bin/main ../src-tauri/whisher/whisper-cli
+          cp build/bin/whisper-cli ../src-tauri/whisher/whisper-cli
           chmod +x ../src-tauri/whisher/whisper-cli
           touch ../src-tauri/whisher/whisper-cli.exe
           cd ..
@@ -63,7 +63,7 @@ jobs:
           cmake --build . --config Release
           cd ../..
           mkdir -Force src-tauri/whisher
-          Copy-Item whisper.cpp/build/bin/Release/main.exe src-tauri/whisher/whisper-cli.exe
+          Copy-Item whisper.cpp/build/bin/Release/whisper-cli.exe src-tauri/whisher/whisper-cli.exe
           New-Item -ItemType File -Path src-tauri/whisher/whisper-cli -Force
           Write-Host "Contents of whisher:"
           Get-ChildItem src-tauri/whisher
