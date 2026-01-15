@@ -29,20 +29,34 @@ async fn transcribe_audio(file_path: String, app_handle: tauri::AppHandle) -> Re
     let base_path = if cfg!(debug_assertions) {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("whisher")
     } else {
-        app_handle.path().resource_dir()
-            .map_err(|e| format!("Не удалось найти директорию ресурсов: {}", e))?
-            .join("whisher")
+        let resource_dir = app_handle.path().resource_dir()
+            .map_err(|e| format!("Не удалось найти директорию ресурсов: {}", e))?;
+        
+        let whisher_path = resource_dir.join("whisher");
+        if whisher_path.exists() {
+            whisher_path
+        } else {
+            resource_dir
+        }
     };
     
     if !base_path.exists() {
         return Ok(TranscriptionResult {
             text: String::new(),
             success: false,
-            error: Some(format!("Директория whisher не найдена по пути: {:?}", base_path)),
+            error: Some(format!("Директория whisher не найдена по пути: {:?}. Resource dir: {:?}", 
+                base_path, 
+                app_handle.path().resource_dir().ok())),
         });
     }
     
-    let whisper_cli_path = base_path.join("whisper-cli");
+    let whisper_cli_name = if cfg!(target_os = "windows") {
+        "whisper-cli.exe"
+    } else {
+        "whisper-cli"
+    };
+    
+    let whisper_cli_path = base_path.join(whisper_cli_name);
     let model_path = base_path.join("models").join("ggml-tiny.bin");
     
     if !whisper_cli_path.exists() {

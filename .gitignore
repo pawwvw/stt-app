@@ -27,8 +27,10 @@ src-tauri/target
 *.sln
 *.sw?
 
-# Whisper (только исходники, сами файлы включены в репозиторий)
+# Whisper
 whisper.cpp
+src-tauri/whisher/whisper-cli
+src-tauri/whisher/whisper-cli.exe
 
 # OS
 .DS_Store

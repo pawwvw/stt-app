@@ -5,7 +5,7 @@ on:
     branches:
       - main
     tags:
-      - 'v*'
+      - "v*"
   pull_request:
     branches:
       - main
@@ -35,7 +35,32 @@ jobs:
         if: matrix.platform == 'ubuntu-latest'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf build-essential
+
+      - name: Build whisper-cli (Linux)
+        if: matrix.platform == 'ubuntu-latest'
+        run: |
+          git clone https://github.com/ggerganov/whisper.cpp.git
+          cd whisper.cpp
+          make -j$(nproc)
+          cp main ../src-tauri/whisher/whisper-cli
+          chmod +x ../src-tauri/whisher/whisper-cli
+          cd ..
+          rm -rf whisper.cpp
+
+      - name: Build whisper-cli (Windows)
+        if: matrix.platform == 'windows-latest'
+        run: |
+          git clone https://github.com/ggerganov/whisper.cpp.git
+          cd whisper.cpp
+          mkdir build
+          cd build
+          cmake ..
+          cmake --build . --config Release
+          copy Release\main.exe ..\..\src-tauri\whisher\whisper-cli.exe
+          cd ..\..
+          rmdir /s /q whisper.cpp
+        shell: cmd
 
       - name: Install frontend dependencies
         run: npm install
@@ -67,7 +92,7 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     permissions:
       contents: write
-    
+
     steps:
       - name: Download Linux artifacts
         uses: actions/download-artifact@v4
