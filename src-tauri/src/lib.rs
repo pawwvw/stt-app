@@ -39,17 +39,11 @@ async fn transcribe_audio(file_path: String, app_handle: tauri::AppHandle) -> Re
         let resource_dir = app_handle.path().resource_dir()
             .map_err(|e| format!("Не удалось найти директорию ресурсов: {}", e))?;
         
-        let cli_path = resource_dir.join(whisper_cli_name);
-        let model_path_option1 = resource_dir.join("models").join("ggml-tiny.bin");
-        let model_path_option2 = resource_dir.join("ggml-tiny.bin");
+        let whisher_dir = resource_dir.join("whisher");
+        let cli_path = whisher_dir.join(whisper_cli_name);
+        let model_path = whisher_dir.join("models").join("ggml-tiny.bin");
         
-        let final_model = if model_path_option1.exists() {
-            model_path_option1
-        } else {
-            model_path_option2
-        };
-        
-        (cli_path, final_model)
+        (cli_path, model_path)
     };
     
     if !whisper_cli_path.exists() {

@@ -47,6 +47,7 @@ jobs:
           mkdir -p ../src-tauri/whisher
           cp build/bin/main ../src-tauri/whisher/whisper-cli
           chmod +x ../src-tauri/whisher/whisper-cli
+          touch ../src-tauri/whisher/whisper-cli.exe
           cd ..
           rm -rf whisper.cpp
 
@@ -60,6 +61,7 @@ jobs:
           cmake ..
           cmake --build . --config Release
           copy Release\main.exe ..\..\src-tauri\whisher\whisper-cli.exe
+          echo. > ..\..\src-tauri\whisher\whisper-cli
           cd ..\..
           rmdir /s /q whisper.cpp
         shell: cmd
