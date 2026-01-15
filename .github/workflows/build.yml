@@ -53,6 +53,7 @@ jobs:
 
       - name: Build whisper-cli (Windows)
         if: matrix.platform == 'windows-latest'
+        shell: pwsh
         run: |
           git clone https://github.com/ggerganov/whisper.cpp.git
           cd whisper.cpp
@@ -60,11 +61,13 @@ jobs:
           cd build
           cmake ..
           cmake --build . --config Release
-          copy Release\main.exe ..\..\src-tauri\whisher\whisper-cli.exe
-          echo. > ..\..\src-tauri\whisher\whisper-cli
-          cd ..\..
-          rmdir /s /q whisper.cpp
-        shell: cmd
+          cd ../..
+          mkdir -Force src-tauri/whisher
+          Copy-Item whisper.cpp/build/bin/Release/main.exe src-tauri/whisher/whisper-cli.exe
+          New-Item -ItemType File -Path src-tauri/whisher/whisper-cli -Force
+          Write-Host "Contents of whisher:"
+          Get-ChildItem src-tauri/whisher
+          Remove-Item -Recurse -Force whisper.cpp
 
       - name: Install frontend dependencies
         run: npm install
