@@ -133,7 +133,6 @@ jobs:
             windows-artifacts/**/*
           draft: false
           prerelease: false
-          body_path: .github/RELEASE_NOTES_TEMPLATE.md
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
