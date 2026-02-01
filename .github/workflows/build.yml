@@ -15,7 +15,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        platform: [ubuntu-latest, windows-latest]
+        platform: [ubuntu-latest, windows-latest, macos-latest]
 
     runs-on: ${{ matrix.platform }}
 
@@ -50,6 +50,14 @@ jobs:
           echo "#!/bin/bash" > ../src-tauri/whisher/whisper-cli.exe
           cd ..
           rm -rf whisper.cpp
+
+      - name: Create whisper-cli placeholders (macOS)
+        if: matrix.platform == 'macos-latest'
+        run: |
+          mkdir -p src-tauri/whisher
+          echo "#!/bin/bash" > src-tauri/whisher/whisper-cli
+          echo "#!/bin/bash" > src-tauri/whisher/whisper-cli.exe
+          chmod +x src-tauri/whisher/whisper-cli
 
       - name: Build whisper-cli (Windows)
         if: matrix.platform == 'windows-latest'
@@ -102,6 +110,15 @@ jobs:
             src-tauri/target/release/bundle/msi/*.msi
             src-tauri/target/release/bundle/nsis/*.exe
 
+      - name: Upload artifacts (macOS)
+        if: matrix.platform == 'macos-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: stt-app-macos
+          path: |
+            src-tauri/target/release/bundle/dmg/*.dmg
+            src-tauri/target/release/bundle/macos/*.app
+
   release:
     needs: build
     runs-on: ubuntu-latest
@@ -125,12 +142,19 @@ jobs:
           name: stt-app-windows
           path: windows-artifacts
 
+      - name: Download macOS artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: stt-app-macos
+          path: macos-artifacts
+
       - name: Create Release
         uses: softprops/action-gh-release@v1
         with:
           files: |
             linux-artifacts/**/*
             windows-artifacts/**/*
+            macos-artifacts/**/*
           draft: false
           prerelease: false
           generate_release_notes: true
