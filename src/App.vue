@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed } from "vue";
+import { ref, computed, onMounted } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 
@@ -8,6 +8,8 @@ const audioFilePath = ref<string>("");
 const isProcessing = ref(false);
 const transcription = ref("");
 const error = ref("");
+const modelInstalled = ref(false);
+const isDownloadingModel = ref(false);
 
 const audioFileName = computed(() => audioFile.value?.name || "");
 const audioFileSize = computed(() => {
@@ -18,6 +20,37 @@ const audioFileSize = computed(() => {
   if (size < 1024 * 1024) return `${(size / 1024).toFixed(2)} KB`;
   return `${(size / (1024 * 1024)).toFixed(2)} MB`;
 });
+
+onMounted(async () => {
+  await checkModelInstalled();
+});
+
+async function checkModelInstalled() {
+  try {
+    const result = await invoke<{ installed: boolean; path?: string }>(
+      "check_model_installed"
+    );
+    modelInstalled.value = result.installed;
+  } catch (e) {
+    console.error("Ошибка при проверке модели:", e);
+    error.value = `Ошибка при проверке модели: ${e}`;
+  }
+}
+
+async function downloadModel() {
+  isDownloadingModel.value = true;
+  error.value = "";
+
+  try {
+    await invoke<string>("download_model");
+    modelInstalled.value = true;
+    error.value = "";
+  } catch (e) {
+    error.value = `Ошибка при скачивании модели: ${e}`;
+  } finally {
+    isDownloadingModel.value = false;
+  }
+}
 
 async function openFileDialog() {
   try {
@@ -120,7 +153,60 @@ function copyTranscription() {
       <p class="subtitle">Загрузите аудио файл для преобразования в текст</p>
     </div>
 
-    <div class="upload-section">
+    <!-- Блок установки модели -->
+    <div v-if="!modelInstalled" class="model-setup">
+      <div class="model-info">
+        <svg
+          xmlns="http://www.w3.org/2000/svg"
+          width="48"
+          height="48"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="2"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+          class="model-icon"
+        >
+          <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z" />
+          <polyline points="3.27 6.96 12 12.01 20.73 6.96" />
+          <line x1="12" y1="22.08" x2="12" y2="12" />
+        </svg>
+        <h2>Модель не установлена</h2>
+        <p>Для работы приложения необходимо установить модель Whisper AI (~75 MB)</p>
+        <button
+          class="btn-primary"
+          @click="downloadModel"
+          :disabled="isDownloadingModel"
+        >
+          <span v-if="!isDownloadingModel">
+            <svg
+              xmlns="http://www.w3.org/2000/svg"
+              width="20"
+              height="20"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            >
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+              <polyline points="7 10 12 15 17 10" />
+              <line x1="12" y1="15" x2="12" y2="3" />
+            </svg>
+            Установить модель
+          </span>
+          <span v-else class="processing">
+            <div class="spinner"></div>
+            Скачивание...
+          </span>
+        </button>
+      </div>
+    </div>
+
+    <!-- Основной функционал (доступен только когда модель установлена) -->
+    <div v-else class="upload-section">
       <div v-if="!audioFile" class="drop-zone" @click="openFileDialog">
         <svg
           xmlns="http://www.w3.org/2000/svg"
@@ -305,6 +391,43 @@ function copyTranscription() {
   color: #666;
   margin: 0;
   padding: 0 1rem;
+}
+
+.model-setup {
+  margin-bottom: 0;
+}
+
+.model-info {
+  text-align: center;
+  padding: clamp(2rem, 5vw, 3rem) clamp(1rem, 3vw, 2rem);
+  background: rgba(255, 255, 255, 0.8);
+  border-radius: 16px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+}
+
+.model-icon {
+  color: #646cff;
+  margin-bottom: 1rem;
+  width: clamp(48px, 10vw, 64px);
+  height: clamp(48px, 10vw, 64px);
+}
+
+.model-info h2 {
+  margin: 1rem 0 0.5rem;
+  font-size: clamp(1.25rem, 3.5vw, 1.5rem);
+  color: #1a1a1a;
+}
+
+.model-info p {
+  color: #666;
+  margin-bottom: 1.5rem;
+  font-size: clamp(0.9rem, 2vw, 1rem);
+  padding: 0 1rem;
+}
+
+.model-info .btn-primary {
+  margin: 0 auto;
+  max-width: 300px;
 }
 
 .upload-section {
@@ -610,6 +733,18 @@ function copyTranscription() {
   }
 
   .subtitle {
+    color: #aaa;
+  }
+
+  .model-info {
+    background: rgba(255, 255, 255, 0.05);
+  }
+
+  .model-info h2 {
+    color: #f6f6f6;
+  }
+
+  .model-info p {
     color: #aaa;
   }
 

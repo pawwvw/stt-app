@@ -35,8 +35,8 @@
     ],
     "resources": [
       "whisher/whisper-cli",
-      "whisher/whisper-cli.exe", 
-      "whisher/models/*"
+      "whisher/whisper-cli.exe",
+      "whisher/*.dll"
     ]
   }
 }

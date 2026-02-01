@@ -42,12 +42,12 @@ jobs:
         run: |
           git clone https://github.com/ggerganov/whisper.cpp.git
           cd whisper.cpp
-          cmake -B build
+          cmake -B build -DCMAKE_BUILD_TYPE=Release
           cmake --build build -j$(nproc)
           mkdir -p ../src-tauri/whisher
-          cp build/bin/whisper-cli ../src-tauri/whisher/whisper-cli
+          cp build/bin/main ../src-tauri/whisher/whisper-cli
           chmod +x ../src-tauri/whisher/whisper-cli
-          touch ../src-tauri/whisher/whisper-cli.exe
+          echo "#!/bin/bash" > ../src-tauri/whisher/whisper-cli.exe
           cd ..
           rm -rf whisper.cpp
 
@@ -55,19 +55,28 @@ jobs:
         if: matrix.platform == 'windows-latest'
         shell: pwsh
         run: |
-          git clone https://github.com/ggerganov/whisper.cpp.git
-          cd whisper.cpp
-          mkdir build
-          cd build
-          cmake ..
-          cmake --build . --config Release
-          cd ../..
-          mkdir -Force src-tauri/whisher
-          Copy-Item whisper.cpp/build/bin/Release/whisper-cli.exe src-tauri/whisher/whisper-cli.exe
-          New-Item -ItemType File -Path src-tauri/whisher/whisper-cli -Force
+          # Download pre-built Windows binaries for whisper.cpp
+          curl -L "https://sourceforge.net/projects/whisper-cpp.mirror/files/v1.7.6/whisper-bin-x64.zip/download" -o whisper-bin-x64.zip
+          
+          # Extract
+          tar -xf whisper-bin-x64.zip
+          
+          # Create whisher directory
+          New-Item -ItemType Directory -Path src-tauri/whisher -Force
+          
+          # Copy whisper-cli.exe and DLLs
+          Copy-Item Release/whisper-cli.exe src-tauri/whisher/whisper-cli.exe
+          Copy-Item Release/*.dll src-tauri/whisher/
+          
+          # Create placeholder for Linux
+          "#!/bin/bash" | Out-File -FilePath src-tauri/whisher/whisper-cli -Encoding ASCII
+          
           Write-Host "Contents of whisher:"
           Get-ChildItem src-tauri/whisher
-          Remove-Item -Recurse -Force whisper.cpp
+          
+          # Cleanup
+          Remove-Item -Recurse -Force Release -ErrorAction SilentlyContinue
+          Remove-Item whisper-bin-x64.zip -ErrorAction SilentlyContinue
 
       - name: Install frontend dependencies
         run: npm install
@@ -101,6 +110,9 @@ jobs:
       contents: write
 
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        
       - name: Download Linux artifacts
         uses: actions/download-artifact@v4
         with:
@@ -121,6 +133,7 @@ jobs:
             windows-artifacts/**/*
           draft: false
           prerelease: false
+          body_path: .github/RELEASE_NOTES_TEMPLATE.md
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -1,5 +1,6 @@
 use std::process::Command;
 use std::path::PathBuf;
+use std::fs;
 use serde::{Deserialize, Serialize};
 use tauri::Manager;
 
@@ -10,9 +11,74 @@ pub struct TranscriptionResult {
     pub error: Option<String>,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ModelStatus {
+    pub installed: bool,
+    pub path: Option<String>,
+}
+
 #[tauri::command]
 fn greet(name: &str) -> String {
     format!("Hello, {}! You've been greeted from Rust!", name)
+}
+
+fn get_model_path(app_handle: &tauri::AppHandle) -> Result<PathBuf, String> {
+    let app_data = app_handle.path().app_data_dir()
+        .map_err(|e| format!("Не удалось получить директорию данных приложения: {}", e))?;
+    
+    let models_dir = app_data.join("models");
+    let model_path = models_dir.join("ggml-tiny.bin");
+    
+    Ok(model_path)
+}
+
+#[tauri::command]
+async fn check_model_installed(app_handle: tauri::AppHandle) -> Result<ModelStatus, String> {
+    let model_path = get_model_path(&app_handle)?;
+    
+    let installed = model_path.exists();
+    
+    Ok(ModelStatus {
+        installed,
+        path: if installed { 
+            Some(model_path.to_string_lossy().to_string()) 
+        } else { 
+            None 
+        },
+    })
+}
+
+#[tauri::command]
+async fn download_model(app_handle: tauri::AppHandle) -> Result<String, String> {
+    let model_path = get_model_path(&app_handle)?;
+    let models_dir = model_path.parent()
+        .ok_or("Не удалось получить родительскую директорию")?;
+    
+    // Создаём директорию если её нет
+    fs::create_dir_all(models_dir)
+        .map_err(|e| format!("Не удалось создать директорию для моделей: {}", e))?;
+    
+    // URL модели tiny от OpenAI Whisper
+    let model_url = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.bin";
+    
+    // Скачиваем модель
+    let response = reqwest::get(model_url)
+        .await
+        .map_err(|e| format!("Не удалось скачать модель: {}", e))?;
+    
+    if !response.status().is_success() {
+        return Err(format!("Ошибка при скачивании модели: {}", response.status()));
+    }
+    
+    let bytes = response.bytes()
+        .await
+        .map_err(|e| format!("Не удалось прочитать данные: {}", e))?;
+    
+    // Сохраняем модель
+    fs::write(&model_path, bytes)
+        .map_err(|e| format!("Не удалось сохранить модель: {}", e))?;
+    
+    Ok(model_path.to_string_lossy().to_string())
 }
 
 #[tauri::command]
@@ -26,24 +92,50 @@ async fn transcribe_audio(file_path: String, app_handle: tauri::AppHandle) -> Re
         });
     }
 
+    // Проверяем наличие модели
+    let model_path = get_model_path(&app_handle)?;
+    if !model_path.exists() {
+        return Ok(TranscriptionResult {
+            text: String::new(),
+            success: false,
+            error: Some("Модель не установлена. Пожалуйста, установите модель.".to_string()),
+        });
+    }
+
+    // Используем whisper-cli
     let whisper_cli_name = if cfg!(target_os = "windows") {
         "whisper-cli.exe"
+    } else if cfg!(target_os = "macos") {
+        "whisper-cli"
     } else {
         "whisper-cli"
     };
     
-    let (whisper_cli_path, model_path) = if cfg!(debug_assertions) {
-        let base = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("whisher");
-        (base.join(whisper_cli_name), base.join("models").join("ggml-tiny.bin"))
+    let whisper_cli_path = if cfg!(debug_assertions) {
+        // В dev режиме берём из whisher директории проекта
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("whisher").join(whisper_cli_name)
     } else {
-        let resource_dir = app_handle.path().resource_dir()
-            .map_err(|e| format!("Не удалось найти директорию ресурсов: {}", e))?;
-        
-        let whisher_dir = resource_dir.join("whisher");
-        let cli_path = whisher_dir.join(whisper_cli_name);
-        let model_path = whisher_dir.join("models").join("ggml-tiny.bin");
-        
-        (cli_path, model_path)
+        if cfg!(target_os = "windows") {
+            // В Windows берём из resource директории
+            let resource_dir = app_handle.path().resource_dir()
+                .map_err(|e| format!("Не удалось найти директорию ресурсов: {}", e))?;
+            resource_dir.join("whisher").join(whisper_cli_name)
+        } else {
+            // В Linux/Mac сначала пробуем из resource директории
+            let resource_dir = app_handle.path().resource_dir()
+                .map_err(|e| format!("Не удалось найти директорию ресурсов: {}", e))?;
+            let resource_path = resource_dir.join("whisher").join(whisper_cli_name);
+            
+            // Если нет в resources, ищем в системе
+            if resource_path.exists() {
+                resource_path
+            } else {
+                // Пробуем найти в PATH
+                which::which("main")
+                    .or_else(|_| which::which("whisper-cli"))
+                    .unwrap_or_else(|_| PathBuf::from("main"))
+            }
+        }
     };
     
     if !whisper_cli_path.exists() {
@@ -51,14 +143,6 @@ async fn transcribe_audio(file_path: String, app_handle: tauri::AppHandle) -> Re
             text: String::new(),
             success: false,
             error: Some(format!("Whisper CLI не найден по пути: {:?}", whisper_cli_path)),
-        });
-    }
-    
-    if !model_path.exists() {
-        return Ok(TranscriptionResult {
-            text: String::new(),
-            success: false,
-            error: Some(format!("Модель не найдена по пути: {:?}", model_path)),
         });
     }
 
@@ -124,7 +208,7 @@ async fn transcribe_audio(file_path: String, app_handle: tauri::AppHandle) -> Re
                         return Ok(TranscriptionResult {
                             text: String::new(),
                             success: false,
-                            error: Some(format!("Не удалось прочитать результат из файла: {}", e)),
+                            error: Some(format!("Не удалось прочитать результат из файла: {}. STDERR: {}. STDOUT: {}", e, stderr, stdout)),
                         });
                     }
                     
@@ -162,7 +246,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
-        .invoke_handler(tauri::generate_handler![greet, transcribe_audio])
+        .invoke_handler(tauri::generate_handler![greet, transcribe_audio, check_model_installed, download_model])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
