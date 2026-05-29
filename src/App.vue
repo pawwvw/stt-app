@@ -1,57 +1,151 @@
 <script setup lang="ts">
-import { ref, computed, onMounted } from "vue";
+import { ref, computed, onMounted, onUnmounted } from "vue";
 import { invoke } from "@tauri-apps/api/core";
-import { open } from "@tauri-apps/plugin-dialog";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { open, save } from "@tauri-apps/plugin-dialog";
+import { writeTextFile } from "@tauri-apps/plugin-fs";
 
-const audioFile = ref<File | null>(null);
+// ---------------------------------------------------------------------------
+// Типы
+// ---------------------------------------------------------------------------
+interface ModelInfo {
+  id: string;
+  name: string;
+  file_name: string;
+  url: string;
+  size_label: string;
+  description: string;
+  installed: boolean;
+}
+interface TranscriptionResult {
+  text: string;
+  srt: string;
+  success: boolean;
+  error?: string;
+  denoised: boolean;
+}
+interface DownloadProgress {
+  model_id: string;
+  downloaded: number;
+  total: number;
+  percent: number;
+}
+interface TranscribeProgress {
+  percent: number;
+  stage: string; // "denoise" | "transcribe"
+}
+
+// ---------------------------------------------------------------------------
+// Состояние
+// ---------------------------------------------------------------------------
+const models = ref<ModelInfo[]>([]);
+const selectedModelId = ref<string>("");
+const downloadingId = ref<string>("");
+const downloadPercent = ref(0);
+
+const LANGUAGES = [
+  { code: "auto", label: "Автоопределение" },
+  { code: "ru", label: "Русский" },
+  { code: "en", label: "Английский" },
+  { code: "de", label: "Немецкий" },
+  { code: "fr", label: "Французский" },
+  { code: "es", label: "Испанский" },
+  { code: "it", label: "Итальянский" },
+  { code: "zh", label: "Китайский" },
+  { code: "ja", label: "Японский" },
+  { code: "tr", label: "Турецкий" },
+];
+const selectedLanguage = ref("auto");
+const denoiseEnabled = ref(true);
+
+const audioFileName = ref<string>("");
 const audioFilePath = ref<string>("");
 const isProcessing = ref(false);
 const transcription = ref("");
+const transcriptionSrt = ref("");
 const error = ref("");
-const modelInstalled = ref(false);
-const isDownloadingModel = ref(false);
+const notice = ref("");
+const showSettings = ref(true);
 
-const audioFileName = computed(() => audioFile.value?.name || "");
-const audioFileSize = computed(() => {
-  if (!audioFile.value) return "";
-  const size = audioFile.value.size;
-  if (size === 0) return "Аудио файл";
-  if (size < 1024) return `${size} B`;
-  if (size < 1024 * 1024) return `${(size / 1024).toFixed(2)} KB`;
-  return `${(size / (1024 * 1024)).toFixed(2)} MB`;
-});
+const transcribePercent = ref(0);
+const transcribeStage = ref<string>("transcribe");
+const stageLabel = computed(() =>
+  transcribeStage.value === "denoise" ? "Шумоподавление…" : "Распознавание…"
+);
 
+let unlistenProgress: UnlistenFn | null = null;
+let unlistenTranscribe: UnlistenFn | null = null;
+
+const installedModels = computed(() => models.value.filter((m) => m.installed));
+const hasInstalledModel = computed(() => installedModels.value.length > 0);
+const activeModel = computed(() =>
+  models.value.find((m) => m.id === selectedModelId.value)
+);
+
+// ---------------------------------------------------------------------------
+// Жизненный цикл
+// ---------------------------------------------------------------------------
 onMounted(async () => {
-  await checkModelInstalled();
+  await refreshModels();
+  unlistenProgress = await listen<DownloadProgress>("download-progress", (e) => {
+    if (e.payload.model_id === downloadingId.value) {
+      downloadPercent.value = Math.round(e.payload.percent);
+    }
+  });
+  unlistenTranscribe = await listen<TranscribeProgress>("transcribe-progress", (e) => {
+    transcribeStage.value = e.payload.stage;
+    transcribePercent.value = e.payload.percent;
+  });
+});
+onUnmounted(() => {
+  if (unlistenProgress) unlistenProgress();
+  if (unlistenTranscribe) unlistenTranscribe();
 });
 
-async function checkModelInstalled() {
+async function refreshModels() {
   try {
-    const result = await invoke<{ installed: boolean; path?: string }>(
-      "check_model_installed"
-    );
-    modelInstalled.value = result.installed;
+    models.value = await invoke<ModelInfo[]>("list_models");
+    // Если активная модель не выбрана — выбираем первую установленную
+    if (!activeModel.value?.installed) {
+      const first = models.value.find((m) => m.installed);
+      selectedModelId.value = first ? first.id : "";
+    }
   } catch (e) {
-    console.error("Ошибка при проверке модели:", e);
-    error.value = `Ошибка при проверке модели: ${e}`;
+    error.value = `Ошибка при загрузке списка моделей: ${e}`;
   }
 }
 
-async function downloadModel() {
-  isDownloadingModel.value = true;
+// ---------------------------------------------------------------------------
+// Модели
+// ---------------------------------------------------------------------------
+async function downloadModel(model: ModelInfo) {
+  downloadingId.value = model.id;
+  downloadPercent.value = 0;
   error.value = "";
-
   try {
-    await invoke<string>("download_model");
-    modelInstalled.value = true;
-    error.value = "";
+    await invoke<string>("download_model", { modelId: model.id });
+    await refreshModels();
+    selectedModelId.value = model.id;
   } catch (e) {
-    error.value = `Ошибка при скачивании модели: ${e}`;
+    error.value = `Ошибка при скачивании модели «${model.name}»: ${e}`;
   } finally {
-    isDownloadingModel.value = false;
+    downloadingId.value = "";
+    downloadPercent.value = 0;
   }
 }
 
+async function deleteModel(model: ModelInfo) {
+  try {
+    await invoke("delete_model", { modelId: model.id });
+    await refreshModels();
+  } catch (e) {
+    error.value = `Ошибка при удалении модели: ${e}`;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Файл
+// ---------------------------------------------------------------------------
 async function openFileDialog() {
   try {
     const selected = await open({
@@ -59,20 +153,13 @@ async function openFileDialog() {
       filters: [
         {
           name: "Audio",
-          extensions: ["mp3", "wav", "ogg", "m4a", "webm", "flac"],
+          extensions: ["mp3", "wav", "ogg", "m4a", "webm", "flac", "aac"],
         },
       ],
     });
-
     if (selected && typeof selected === "string") {
       audioFilePath.value = selected;
-      const fileName = selected.split(/[/\\]/).pop() || "audio.mp3";
-
-      audioFile.value = {
-        name: fileName,
-        size: 0,
-      } as File;
-
+      audioFileName.value = selected.split(/[/\\]/).pop() || "audio";
       error.value = "";
       transcription.value = "";
     }
@@ -82,35 +169,45 @@ async function openFileDialog() {
 }
 
 function removeFile() {
-  audioFile.value = null;
+  audioFileName.value = "";
   audioFilePath.value = "";
   transcription.value = "";
   error.value = "";
+  notice.value = "";
 }
 
+// ---------------------------------------------------------------------------
+// Транскрибация
+// ---------------------------------------------------------------------------
 async function transcribeAudio() {
-  if (!audioFile.value || !audioFilePath.value) {
+  if (!audioFilePath.value) {
     error.value = "Файл не выбран";
     return;
   }
-
+  if (!selectedModelId.value) {
+    error.value = "Не выбрана модель";
+    return;
+  }
   isProcessing.value = true;
   error.value = "";
+  notice.value = "";
   transcription.value = "";
-
+  transcriptionSrt.value = "";
+  transcribePercent.value = 0;
+  transcribeStage.value = "transcribe";
   try {
-    const result = await invoke<{
-      text: string;
-      success: boolean;
-      error?: string;
-    }>("transcribe_audio", {
+    const result = await invoke<TranscriptionResult>("transcribe_audio", {
       filePath: audioFilePath.value,
+      modelId: selectedModelId.value,
+      language: selectedLanguage.value === "auto" ? "auto" : selectedLanguage.value,
+      denoise: denoiseEnabled.value,
     });
-
     if (result.success) {
       transcription.value = result.text;
-      if (result.error) {
-        console.warn("Предупреждение:", result.error);
+      transcriptionSrt.value = result.srt;
+      if (denoiseEnabled.value && !result.denoised) {
+        notice.value =
+          "Шумоподавление пропущено: FFmpeg не найден в системе. Текст распознан без предобработки.";
       }
     } else {
       error.value = result.error || "Неизвестная ошибка при расшифровке";
@@ -122,912 +219,523 @@ async function transcribeAudio() {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Результат: копирование и экспорт
+// ---------------------------------------------------------------------------
 function copyTranscription() {
-  if (transcription.value) {
-    navigator.clipboard.writeText(transcription.value);
+  if (transcription.value) navigator.clipboard.writeText(transcription.value);
+}
+
+async function exportAs(format: "txt" | "srt" | "md") {
+  if (!transcription.value) return;
+  let content = transcription.value;
+  if (format === "srt") {
+    content = transcriptionSrt.value || transcription.value;
+  } else if (format === "md") {
+    const lang = LANGUAGES.find((l) => l.code === selectedLanguage.value)?.label;
+    content =
+      `# Расшифровка: ${audioFileName.value}\n\n` +
+      `- Модель: ${activeModel.value?.name}\n` +
+      `- Язык: ${lang}\n` +
+      `- Шумоподавление: ${denoiseEnabled.value ? "да" : "нет"}\n\n` +
+      `---\n\n${transcription.value}\n`;
   }
+  try {
+    const path = await save({
+      defaultPath: `${baseName()}.${format}`,
+      filters: [{ name: format.toUpperCase(), extensions: [format] }],
+    });
+    if (path) await writeTextFile(path, content);
+  } catch (e) {
+    error.value = `Ошибка при экспорте: ${e}`;
+  }
+}
+
+function baseName(): string {
+  return (audioFileName.value || "transcription").replace(/\.[^.]+$/, "");
 }
 </script>
 
 <template>
-  <main class="container">
-    <div class="header">
-      <h1>
-        <svg
-          xmlns="http://www.w3.org/2000/svg"
-          width="32"
-          height="32"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          stroke-width="2"
-          stroke-linecap="round"
-          stroke-linejoin="round"
-        >
+  <div class="app">
+    <header class="topbar">
+      <div class="brand">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+          stroke-linecap="round" stroke-linejoin="round">
           <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z" />
           <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
           <line x1="12" x2="12" y1="19" y2="22" />
         </svg>
-        Расшифровка аудио
-      </h1>
-      <p class="subtitle">Загрузите аудио файл для преобразования в текст</p>
-    </div>
-
-    <!-- Блок установки модели -->
-    <div v-if="!modelInstalled" class="model-setup">
-      <div class="model-info">
-        <svg
-          xmlns="http://www.w3.org/2000/svg"
-          width="48"
-          height="48"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          stroke-width="2"
-          stroke-linecap="round"
-          stroke-linejoin="round"
-          class="model-icon"
-        >
-          <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z" />
-          <polyline points="3.27 6.96 12 12.01 20.73 6.96" />
-          <line x1="12" y1="22.08" x2="12" y2="12" />
+        <span>Расшифровка аудио</span>
+      </div>
+      <button class="ghost-btn" @click="showSettings = !showSettings">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+          stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="3" />
+          <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z" />
         </svg>
-        <h2>Модель не установлена</h2>
-        <p>Для работы приложения необходимо установить модель Whisper AI (~75 MB)</p>
-        <button
-          class="btn-primary"
-          @click="downloadModel"
-          :disabled="isDownloadingModel"
-        >
-          <span v-if="!isDownloadingModel">
-            <svg
-              xmlns="http://www.w3.org/2000/svg"
-              width="20"
-              height="20"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="2"
-              stroke-linecap="round"
-              stroke-linejoin="round"
-            >
-              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-              <polyline points="7 10 12 15 17 10" />
-              <line x1="12" y1="15" x2="12" y2="3" />
-            </svg>
-            Установить модель
-          </span>
-          <span v-else class="processing">
-            <div class="spinner"></div>
-            Скачивание...
-          </span>
-        </button>
-      </div>
-    </div>
+        Настройки
+      </button>
+    </header>
 
-    <!-- Основной функционал (доступен только когда модель установлена) -->
-    <div v-else class="upload-section">
-      <div v-if="!audioFile" class="drop-zone" @click="openFileDialog">
-        <svg
-          xmlns="http://www.w3.org/2000/svg"
-          width="64"
-          height="64"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          stroke-width="2"
-          stroke-linecap="round"
-          stroke-linejoin="round"
-          class="upload-icon"
-        >
-          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-          <polyline points="17 8 12 3 7 8" />
-          <line x1="12" x2="12" y1="3" y2="15" />
-        </svg>
-        <h3>Выберите аудио файл</h3>
-        <p>Нажмите для выбора файла</p>
-        <div class="supported-formats">
-          <span class="format-badge">MP3</span>
-        </div>
-      </div>
-
-      <div v-else class="file-info">
-        <div class="file-card">
-          <div class="file-icon">
-            <svg
-              xmlns="http://www.w3.org/2000/svg"
-              width="48"
-              height="48"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="2"
-              stroke-linecap="round"
-              stroke-linejoin="round"
+    <div class="layout" :class="{ 'with-panel': showSettings }">
+      <!-- ===================== Панель настроек ===================== -->
+      <aside v-show="showSettings" class="panel">
+        <section class="panel-block">
+          <h3>Модель распознавания</h3>
+          <div class="model-list">
+            <div
+              v-for="m in models"
+              :key="m.id"
+              class="model-row"
+              :class="{ active: m.installed && m.id === selectedModelId }"
             >
-              <path d="M9 18V5l12-2v13" />
-              <circle cx="6" cy="18" r="3" />
-              <circle cx="18" cy="16" r="3" />
-            </svg>
+              <label class="model-pick">
+                <input
+                  type="radio"
+                  name="model"
+                  :value="m.id"
+                  v-model="selectedModelId"
+                  :disabled="!m.installed"
+                />
+                <span class="model-meta">
+                  <span class="model-name">{{ m.name }}</span>
+                  <span class="model-desc">{{ m.description }} · {{ m.size_label }}</span>
+                </span>
+              </label>
+              <div class="model-actions">
+                <template v-if="downloadingId === m.id">
+                  <span class="dl-progress">{{ downloadPercent }}%</span>
+                </template>
+                <button
+                  v-else-if="!m.installed"
+                  class="mini-btn"
+                  @click="downloadModel(m)"
+                  :disabled="!!downloadingId"
+                  title="Скачать"
+                >
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                    stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                    <polyline points="7 10 12 15 17 10" />
+                    <line x1="12" y1="15" x2="12" y2="3" />
+                  </svg>
+                </button>
+                <button
+                  v-else
+                  class="mini-btn danger"
+                  @click="deleteModel(m)"
+                  title="Удалить"
+                >
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                    stroke-linecap="round" stroke-linejoin="round">
+                    <polyline points="3 6 5 6 21 6" />
+                    <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+                  </svg>
+                </button>
+              </div>
+              <div v-if="downloadingId === m.id" class="dl-bar">
+                <div class="dl-fill" :style="{ width: downloadPercent + '%' }"></div>
+              </div>
+            </div>
           </div>
-          <div class="file-details">
-            <h3>{{ audioFileName }}</h3>
-            <p>{{ audioFileSize }}</p>
-          </div>
-          <button class="btn-icon" @click="removeFile" title="Удалить файл">
-            <svg
-              xmlns="http://www.w3.org/2000/svg"
-              width="20"
-              height="20"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="2"
-              stroke-linecap="round"
-              stroke-linejoin="round"
-            >
-              <line x1="18" x2="6" y1="6" y2="18" />
-              <line x1="6" x2="18" y1="6" y2="18" />
-            </svg>
-          </button>
-        </div>
+        </section>
 
-        <button
-          class="btn-primary"
-          @click="transcribeAudio"
-          :disabled="isProcessing"
-        >
-          <span v-if="!isProcessing">
-            <svg
-              xmlns="http://www.w3.org/2000/svg"
-              width="20"
-              height="20"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="2"
-              stroke-linecap="round"
-              stroke-linejoin="round"
-            >
-              <polygon points="5 3 19 12 5 21 5 3" />
-            </svg>
-            Начать расшифровку
-          </span>
-          <span v-else class="processing">
-            <div class="spinner"></div>
-            Обработка...
-          </span>
-        </button>
-      </div>
-    </div>
+        <section class="panel-block">
+          <h3>Язык аудио</h3>
+          <select v-model="selectedLanguage" class="select">
+            <option v-for="l in LANGUAGES" :key="l.code" :value="l.code">
+              {{ l.label }}
+            </option>
+          </select>
+        </section>
 
-    <div v-if="error" class="alert alert-error">
-      <svg
-        xmlns="http://www.w3.org/2000/svg"
-        width="20"
-        height="20"
-        viewBox="0 0 24 24"
-        fill="none"
-        stroke="currentColor"
-        stroke-width="2"
-        stroke-linecap="round"
-        stroke-linejoin="round"
-      >
-        <circle cx="12" cy="12" r="10" />
-        <line x1="12" x2="12" y1="8" y2="12" />
-        <line x1="12" x2="12.01" y1="16" y2="16" />
-      </svg>
-      {{ error }}
-    </div>
+        <section class="panel-block">
+          <h3>Шумоподавление</h3>
+          <label class="switch-row">
+            <input type="checkbox" v-model="denoiseEnabled" />
+            <span>Очищать запись от шума (FFmpeg)</span>
+          </label>
+          <p class="hint">
+            Подавление фонового шума, срез гула и нормализация громкости перед
+            распознаванием. Если FFmpeg не установлен — шаг будет пропущен.
+          </p>
+        </section>
+      </aside>
 
-    <div v-if="transcription" class="result-section">
-      <div class="result-header">
-        <h2>Результат расшифровки</h2>
-        <button class="btn-secondary" @click="copyTranscription">
-          <svg
-            xmlns="http://www.w3.org/2000/svg"
-            width="18"
-            height="18"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="2"
-            stroke-linecap="round"
-            stroke-linejoin="round"
-          >
-            <rect width="14" height="14" x="8" y="8" rx="2" ry="2" />
-            <path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2" />
+      <!-- ===================== Рабочая область ===================== -->
+      <main class="work">
+        <div v-if="!hasInstalledModel" class="empty-state">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"
+            stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z" />
+            <polyline points="3.27 6.96 12 12.01 20.73 6.96" />
+            <line x1="12" y1="22.08" x2="12" y2="12" />
           </svg>
-          Копировать
-        </button>
-      </div>
-      <div class="transcription-text">
-        {{ transcription }}
-      </div>
+          <h2>Установите модель</h2>
+          <p>Откройте «Настройки» и скачайте хотя бы одну модель Whisper, чтобы начать.</p>
+        </div>
+
+        <template v-else>
+          <div v-if="!audioFilePath" class="drop-zone" @click="openFileDialog">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"
+              stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+              <polyline points="17 8 12 3 7 8" />
+              <line x1="12" x2="12" y1="3" y2="15" />
+            </svg>
+            <h3>Выберите аудиофайл</h3>
+            <p>MP3, WAV, OGG, M4A, FLAC, AAC, WEBM</p>
+          </div>
+
+          <div v-else class="file-block">
+            <div class="file-card">
+              <div class="file-icon">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                  stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M9 18V5l12-2v13" />
+                  <circle cx="6" cy="18" r="3" />
+                  <circle cx="18" cy="16" r="3" />
+                </svg>
+              </div>
+              <div class="file-details">
+                <h3>{{ audioFileName }}</h3>
+                <p>
+                  Модель: {{ activeModel?.name }} ·
+                  Язык: {{ LANGUAGES.find((l) => l.code === selectedLanguage)?.label }}
+                  <template v-if="denoiseEnabled"> · Шумоподавление</template>
+                </p>
+              </div>
+              <button class="btn-icon" @click="removeFile" title="Убрать файл">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                  stroke-linecap="round" stroke-linejoin="round">
+                  <line x1="18" x2="6" y1="6" y2="18" />
+                  <line x1="6" x2="18" y1="6" y2="18" />
+                </svg>
+              </button>
+            </div>
+
+            <button class="btn-primary" @click="transcribeAudio" :disabled="isProcessing">
+              <span v-if="!isProcessing">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                  stroke-linecap="round" stroke-linejoin="round">
+                  <polygon points="5 3 19 12 5 21 5 3" />
+                </svg>
+                Начать расшифровку
+              </span>
+              <span v-else class="processing">
+                <span class="spinner"></span>
+                {{ stageLabel }} {{ transcribePercent }}%
+              </span>
+            </button>
+
+            <div v-if="isProcessing" class="progress-bar">
+              <div class="progress-fill" :style="{ width: transcribePercent + '%' }"></div>
+            </div>
+          </div>
+
+          <div v-if="error" class="alert alert-error">{{ error }}</div>
+          <div v-if="notice" class="alert alert-notice">{{ notice }}</div>
+
+          <div v-if="transcription" class="result">
+            <div class="result-head">
+              <h2>Результат</h2>
+              <div class="result-actions">
+                <button class="btn-secondary" @click="copyTranscription">Копировать</button>
+                <button class="btn-secondary" @click="exportAs('txt')">.txt</button>
+                <button class="btn-secondary" @click="exportAs('srt')">.srt</button>
+                <button class="btn-secondary" @click="exportAs('md')">.md</button>
+              </div>
+            </div>
+            <div class="result-text">{{ transcription }}</div>
+          </div>
+        </template>
+      </main>
     </div>
-  </main>
+  </div>
 </template>
 
 <style scoped>
-.container {
-  max-width: 900px;
-  width: 100%;
+.app {
   height: 100vh;
-  margin: 0 auto;
-  padding: clamp(1rem, 3vh, 2rem) 1.5rem;
-  box-sizing: border-box;
   display: flex;
   flex-direction: column;
-  gap: clamp(1.5rem, 3vh, 2.5rem);
-  overflow-y: auto;
-  overflow-x: hidden;
+  background: var(--bg);
+  color: var(--fg);
 }
 
-.header {
-  text-align: center;
-  margin-bottom: 0;
-}
-
-.header h1 {
+.topbar {
   display: flex;
   align-items: center;
-  justify-content: center;
-  gap: 0.75rem;
-  font-size: clamp(1.75rem, 5vw, 2.5rem);
-  font-weight: 700;
-  margin-bottom: 0.5rem;
-  color: #1a1a1a;
-  flex-wrap: wrap;
+  justify-content: space-between;
+  padding: 0.85rem 1.25rem;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
 }
-
-.header h1 svg {
-  color: #646cff;
-  width: clamp(24px, 5vw, 32px);
-  height: clamp(24px, 5vw, 32px);
-}
-
-.subtitle {
-  font-size: clamp(0.95rem, 2.5vw, 1.1rem);
-  color: #666;
-  margin: 0;
-  padding: 0 1rem;
-}
-
-.model-setup {
-  margin-bottom: 0;
-}
-
-.model-info {
-  text-align: center;
-  padding: clamp(2rem, 5vw, 3rem) clamp(1rem, 3vw, 2rem);
-  background: rgba(255, 255, 255, 0.8);
-  border-radius: 16px;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
-}
-
-.model-icon {
-  color: #646cff;
-  margin-bottom: 1rem;
-  width: clamp(48px, 10vw, 64px);
-  height: clamp(48px, 10vw, 64px);
-}
-
-.model-info h2 {
-  margin: 1rem 0 0.5rem;
-  font-size: clamp(1.25rem, 3.5vw, 1.5rem);
-  color: #1a1a1a;
-}
-
-.model-info p {
-  color: #666;
-  margin-bottom: 1.5rem;
-  font-size: clamp(0.9rem, 2vw, 1rem);
-  padding: 0 1rem;
-}
-
-.model-info .btn-primary {
-  margin: 0 auto;
-  max-width: 300px;
-}
-
-.upload-section {
-  margin-bottom: 0;
-}
-
-.drop-zone {
-  border: 3px dashed #ccc;
-  border-radius: 16px;
-  padding: clamp(2rem, 5vw, 3rem) clamp(1rem, 3vw, 2rem);
-  text-align: center;
-  cursor: pointer;
-  transition: all 0.3s ease;
-  background: rgba(255, 255, 255, 0.5);
-}
-
-.drop-zone:hover {
-  border-color: #646cff;
-  background: rgba(100, 108, 255, 0.05);
-  transform: translateY(-2px);
-}
-
-.drop-zone.dragging {
-  border-color: #646cff;
-  background: rgba(100, 108, 255, 0.1);
-  transform: scale(1.02);
-}
-
-.upload-icon {
-  color: #646cff;
-  margin-bottom: 1rem;
-  width: clamp(48px, 10vw, 64px);
-  height: clamp(48px, 10vw, 64px);
-}
-
-.drop-zone h3 {
-  margin: 1rem 0 0.5rem;
-  font-size: clamp(1.1rem, 3vw, 1.3rem);
-  color: #1a1a1a;
-}
-
-.drop-zone p {
-  color: #666;
-  margin-bottom: 1.5rem;
-  font-size: clamp(0.9rem, 2vw, 1rem);
-}
-
-.supported-formats {
+.brand {
   display: flex;
-  gap: 0.5rem;
-  justify-content: center;
-  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.6rem;
+  font-weight: 700;
+  font-size: 1.1rem;
 }
+.brand svg { width: 24px; height: 24px; color: var(--accent); }
 
-.format-badge {
-  display: inline-block;
-  padding: 0.25rem 0.75rem;
-  background: rgba(100, 108, 255, 0.1);
-  color: #646cff;
-  border-radius: 12px;
-  font-size: 0.85rem;
+.ghost-btn {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.5rem 0.85rem;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--fg);
+  border-radius: 10px;
+  font-size: 0.9rem;
   font-weight: 600;
+  cursor: pointer;
+  transition: 0.2s;
 }
+.ghost-btn:hover { border-color: var(--accent); color: var(--accent); }
+.ghost-btn svg { width: 16px; height: 16px; }
 
-.file-info {
+.layout {
+  flex: 1;
+  display: grid;
+  grid-template-columns: 1fr;
+  overflow: hidden;
+}
+.layout.with-panel { grid-template-columns: 320px 1fr; }
+
+.panel {
+  border-right: 1px solid var(--border);
+  background: var(--surface);
+  overflow-y: auto;
+  padding: 1.25rem;
   display: flex;
   flex-direction: column;
   gap: 1.5rem;
 }
+.panel-block h3 {
+  margin: 0 0 0.75rem;
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+}
 
+.model-list { display: flex; flex-direction: column; gap: 0.4rem; }
+.model-row {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.6rem 0.7rem;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  transition: 0.2s;
+}
+.model-row.active { border-color: var(--accent); background: var(--accent-soft); }
+.model-pick { display: flex; align-items: center; gap: 0.6rem; cursor: pointer; flex: 1; }
+.model-pick input { accent-color: var(--accent); }
+.model-meta { display: flex; flex-direction: column; }
+.model-name { font-weight: 600; font-size: 0.92rem; }
+.model-desc { font-size: 0.75rem; color: var(--muted); }
+.model-actions { flex-shrink: 0; }
+
+.mini-btn {
+  width: 32px; height: 32px;
+  display: flex; align-items: center; justify-content: center;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--accent);
+  border-radius: 8px; cursor: pointer; transition: 0.2s;
+}
+.mini-btn:hover:not(:disabled) { background: var(--accent-soft); }
+.mini-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.mini-btn.danger { color: #ff453a; }
+.mini-btn.danger:hover { background: rgba(255, 69, 58, 0.12); }
+.mini-btn svg { width: 16px; height: 16px; }
+
+.dl-progress { font-size: 0.8rem; font-weight: 700; color: var(--accent); }
+.dl-bar {
+  position: absolute; left: 0.7rem; right: 0.7rem; bottom: 4px;
+  height: 3px; background: var(--border); border-radius: 2px; overflow: hidden;
+}
+.dl-fill { height: 100%; background: var(--accent); transition: width 0.2s; }
+
+.select {
+  width: 100%;
+  padding: 0.6rem 0.7rem;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg);
+  color: var(--fg);
+  font-size: 0.92rem;
+}
+
+.switch-row {
+  display: flex; align-items: center; gap: 0.6rem;
+  font-size: 0.92rem; cursor: pointer;
+}
+.switch-row input { width: 18px; height: 18px; accent-color: var(--accent); }
+.hint { margin: 0.5rem 0 0; font-size: 0.78rem; color: var(--muted); line-height: 1.5; }
+
+.work {
+  overflow-y: auto;
+  padding: 2rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+}
+
+.empty-state, .drop-zone {
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  text-align: center; gap: 0.4rem;
+  border-radius: 18px;
+}
+.empty-state { color: var(--muted); padding: 3rem; }
+.empty-state svg, .drop-zone svg { width: 56px; height: 56px; color: var(--accent); margin-bottom: 0.5rem; }
+.empty-state h2 { margin: 0; color: var(--fg); }
+
+.drop-zone {
+  border: 2px dashed var(--border);
+  padding: 3rem 2rem;
+  cursor: pointer;
+  transition: 0.25s;
+  background: var(--surface);
+}
+.drop-zone:hover { border-color: var(--accent); background: var(--accent-soft); transform: translateY(-2px); }
+.drop-zone h3 { margin: 0.5rem 0 0; }
+.drop-zone p { margin: 0; color: var(--muted); font-size: 0.88rem; }
+
+.file-block { display: flex; flex-direction: column; gap: 1rem; }
 .file-card {
-  display: flex;
-  align-items: center;
-  gap: clamp(0.75rem, 3vw, 1.5rem);
-  padding: clamp(1rem, 3vw, 1.5rem);
-  background: rgba(255, 255, 255, 0.8);
-  border-radius: 16px;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+  display: flex; align-items: center; gap: 1rem;
+  padding: 1rem 1.25rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 14px;
 }
-
 .file-icon {
-  flex-shrink: 0;
-  width: clamp(48px, 10vw, 64px);
-  height: clamp(48px, 10vw, 64px);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: rgba(100, 108, 255, 0.1);
-  border-radius: 12px;
-  color: #646cff;
+  flex-shrink: 0; width: 52px; height: 52px;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--accent-soft); color: var(--accent); border-radius: 12px;
 }
-
-.file-icon svg {
-  width: clamp(32px, 7vw, 48px);
-  height: clamp(32px, 7vw, 48px);
-}
-
-.file-details {
-  flex: 1;
-  min-width: 0;
-}
-
-.file-details h3 {
-  margin: 0 0 0.25rem;
-  font-size: clamp(0.95rem, 2.5vw, 1.1rem);
-  color: #1a1a1a;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.file-details p {
-  margin: 0;
-  color: #666;
-  font-size: clamp(0.85rem, 2vw, 0.9rem);
-}
+.file-icon svg { width: 28px; height: 28px; }
+.file-details { flex: 1; min-width: 0; }
+.file-details h3 { margin: 0 0 0.2rem; font-size: 1rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.file-details p { margin: 0; color: var(--muted); font-size: 0.82rem; }
 
 .btn-icon {
-  flex-shrink: 0;
-  width: 40px;
-  height: 40px;
-  border: none;
-  background: rgba(255, 59, 48, 0.1);
-  color: #ff3b30;
-  border-radius: 10px;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  transition: all 0.2s;
+  flex-shrink: 0; width: 38px; height: 38px;
+  display: flex; align-items: center; justify-content: center;
+  border: none; background: rgba(255, 69, 58, 0.1); color: #ff453a;
+  border-radius: 10px; cursor: pointer; transition: 0.2s;
 }
-
-.btn-icon:hover {
-  background: rgba(255, 59, 48, 0.2);
-  transform: scale(1.1);
-}
+.btn-icon:hover { background: rgba(255, 69, 58, 0.2); }
+.btn-icon svg { width: 18px; height: 18px; }
 
 .btn-primary {
   width: 100%;
-  padding: clamp(0.85rem, 2.5vw, 1rem) clamp(1.5rem, 4vw, 2rem);
-  font-size: clamp(1rem, 2.5vw, 1.1rem);
+  padding: 0.95rem;
+  font-size: 1.05rem;
   font-weight: 600;
-  color: white;
-  background: linear-gradient(135deg, #646cff 0%, #535bf2 100%);
-  border: none;
-  border-radius: 12px;
-  cursor: pointer;
-  transition: all 0.3s ease;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 0.5rem;
-  box-shadow: 0 4px 12px rgba(100, 108, 255, 0.3);
+  color: #fff;
+  background: linear-gradient(135deg, var(--accent) 0%, var(--accent-2) 100%);
+  border: none; border-radius: 12px; cursor: pointer; transition: 0.25s;
+  box-shadow: 0 4px 14px var(--accent-shadow);
+}
+.btn-primary:hover:not(:disabled) { transform: translateY(-2px); box-shadow: 0 6px 20px var(--accent-shadow); }
+.btn-primary:disabled { opacity: 0.7; cursor: not-allowed; }
+.btn-primary span { display: inline-flex; align-items: center; gap: 0.5rem; justify-content: center; }
+.btn-primary svg { width: 20px; height: 20px; }
+
+.progress-bar {
+  height: 6px;
+  background: var(--border);
+  border-radius: 3px;
+  overflow: hidden;
+}
+.progress-fill {
+  height: 100%;
+  background: linear-gradient(135deg, var(--accent) 0%, var(--accent-2) 100%);
+  transition: width 0.25s ease;
 }
 
-.btn-primary:hover:not(:disabled) {
-  transform: translateY(-2px);
-  box-shadow: 0 6px 20px rgba(100, 108, 255, 0.4);
-}
-
-.btn-primary:active:not(:disabled) {
-  transform: translateY(0);
-}
-
-.btn-primary:disabled {
-  opacity: 0.7;
-  cursor: not-allowed;
-}
-
-.btn-primary span {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-}
-
-.processing {
-  display: flex;
-  align-items: center;
-  gap: 0.75rem;
-}
-
+.processing { display: inline-flex; align-items: center; gap: 0.6rem; }
 .spinner {
-  width: 20px;
-  height: 20px;
+  width: 18px; height: 18px;
   border: 3px solid rgba(255, 255, 255, 0.3);
-  border-top-color: white;
-  border-radius: 50%;
+  border-top-color: #fff; border-radius: 50%;
   animation: spin 0.8s linear infinite;
 }
+@keyframes spin { to { transform: rotate(360deg); } }
 
-@keyframes spin {
-  to {
-    transform: rotate(360deg);
-  }
-}
+.alert { padding: 0.85rem 1.1rem; border-radius: 12px; font-size: 0.9rem; }
+.alert-error { background: rgba(255, 69, 58, 0.1); color: #ff453a; border: 1px solid rgba(255, 69, 58, 0.2); }
+.alert-notice { background: rgba(255, 159, 10, 0.12); color: #c77700; border: 1px solid rgba(255, 159, 10, 0.25); }
 
-.alert {
-  padding: 1rem 1.5rem;
-  border-radius: 12px;
-  display: flex;
-  align-items: center;
-  gap: 0.75rem;
-  margin-bottom: 0;
-  animation: slideIn 0.3s ease;
-}
-
-@keyframes slideIn {
-  from {
-    opacity: 0;
-    transform: translateY(-10px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
-}
-
-.alert-error {
-  background: rgba(255, 59, 48, 0.1);
-  color: #ff3b30;
-  border: 1px solid rgba(255, 59, 48, 0.2);
-}
-
-.result-section {
-  animation: slideIn 0.4s ease;
-}
-
-.result-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 0.75rem;
-}
-
-.result-header h2 {
-  margin: 0;
-  font-size: clamp(1.25rem, 3.5vw, 1.5rem);
-  color: #1a1a1a;
-}
-
+.result { display: flex; flex-direction: column; gap: 0.75rem; }
+.result-head { display: flex; align-items: center; justify-content: space-between; }
+.result-head h2 { margin: 0; font-size: 1.3rem; }
+.result-actions { display: flex; gap: 0.5rem; }
 .btn-secondary {
-  padding: clamp(0.5rem, 1.5vw, 0.6rem) clamp(1rem, 3vw, 1.2rem);
-  font-size: clamp(0.85rem, 2vw, 0.95rem);
-  font-weight: 600;
-  color: #646cff;
-  background: rgba(100, 108, 255, 0.1);
-  border: 1px solid rgba(100, 108, 255, 0.2);
-  border-radius: 10px;
-  cursor: pointer;
-  transition: all 0.2s;
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  white-space: nowrap;
+  padding: 0.55rem 1rem;
+  font-size: 0.88rem; font-weight: 600;
+  color: var(--accent); background: var(--accent-soft);
+  border: 1px solid var(--border); border-radius: 10px; cursor: pointer; transition: 0.2s;
 }
-
-.btn-secondary svg {
-  width: clamp(16px, 3vw, 18px);
-  height: clamp(16px, 3vw, 18px);
-}
-
-.btn-secondary:hover {
-  background: rgba(100, 108, 255, 0.2);
-  transform: translateY(-1px);
-}
-
-.transcription-text {
-  background: rgba(255, 255, 255, 0.8);
-  padding: clamp(1rem, 3vw, 1.5rem);
-  border-radius: 12px;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+.btn-secondary:hover { background: var(--accent); color: #fff; }
+.result-text {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  padding: 1.25rem;
+  border-radius: 14px;
   line-height: 1.8;
-  color: #1a1a1a;
-  font-size: clamp(0.9rem, 2.5vw, 1rem);
   white-space: pre-wrap;
   word-wrap: break-word;
-  max-height: 400px;
+  max-height: 50vh;
   overflow-y: auto;
 }
 
-/* Scrollbar styling */
-.transcription-text::-webkit-scrollbar {
-  width: 8px;
-}
-
-.transcription-text::-webkit-scrollbar-track {
-  background: rgba(0, 0, 0, 0.05);
-  border-radius: 4px;
-}
-
-.transcription-text::-webkit-scrollbar-thumb {
-  background: rgba(100, 108, 255, 0.3);
-  border-radius: 4px;
-}
-
-.transcription-text::-webkit-scrollbar-thumb:hover {
-  background: rgba(100, 108, 255, 0.5);
-}
-
-@media (prefers-color-scheme: dark) {
-  .header h1 {
-    color: #f6f6f6;
-  }
-
-  .subtitle {
-    color: #aaa;
-  }
-
-  .model-info {
-    background: rgba(255, 255, 255, 0.05);
-  }
-
-  .model-info h2 {
-    color: #f6f6f6;
-  }
-
-  .model-info p {
-    color: #aaa;
-  }
-
-  .drop-zone {
-    background: rgba(255, 255, 255, 0.05);
-    border-color: #444;
-  }
-
-  .drop-zone:hover {
-    background: rgba(100, 108, 255, 0.1);
-  }
-
-  .drop-zone h3 {
-    color: #f6f6f6;
-  }
-
-  .drop-zone p {
-    color: #aaa;
-  }
-
-  .file-card {
-    background: rgba(255, 255, 255, 0.05);
-  }
-
-  .file-details h3 {
-    color: #f6f6f6;
-  }
-
-  .file-details p {
-    color: #aaa;
-  }
-
-  .result-header h2 {
-    color: #f6f6f6;
-  }
-
-  .transcription-text {
-    background: rgba(255, 255, 255, 0.05);
-    color: #f6f6f6;
-  }
-}
-
-/* Адаптивный дизайн для мобильных устройств */
-@media (max-width: 768px) {
-  .container {
-    padding: 1rem;
-    gap: 1.25rem;
-  }
-
-  .header {
-    margin-bottom: 0;
-  }
-
-  .header h1 {
-    gap: 0.5rem;
-  }
-
-  .drop-zone {
-    border-width: 2px;
-    padding: 2rem 1rem;
-  }
-
-  .supported-formats {
-    gap: 0.35rem;
-  }
-
-  .format-badge {
-    padding: 0.2rem 0.6rem;
-    font-size: 0.8rem;
-  }
-
-  .file-card {
-    gap: 1rem;
-    padding: 1rem;
-  }
-
-  .btn-icon {
-    width: 36px;
-    height: 36px;
-  }
-
-  .btn-icon svg {
-    width: 18px;
-    height: 18px;
-  }
-
-  .result-header {
-    flex-direction: column;
-    gap: 1rem;
-    align-items: flex-start;
-  }
-
-  .btn-secondary {
-    width: 100%;
-    justify-content: center;
-  }
-
-  .alert {
-    padding: 0.85rem 1rem;
-    font-size: 0.9rem;
-  }
-}
-
-@media (max-width: 480px) {
-  .container {
-    padding: 0.75rem;
-    gap: 1rem;
-  }
-
-  .header {
-    margin-bottom: 0;
-  }
-
-  .upload-section {
-    margin-bottom: 0;
-  }
-
-  .drop-zone h3 {
-    font-size: 1rem;
-  }
-
-  .drop-zone p {
-    font-size: 0.85rem;
-  }
-
-  .file-icon {
-    width: 48px;
-    height: 48px;
-  }
-
-  .file-icon svg {
-    width: 32px;
-    height: 32px;
-  }
-
-  .file-details h3 {
-    font-size: 0.9rem;
-  }
-
-  .file-details p {
-    font-size: 0.8rem;
-  }
-
-  .btn-primary {
-    padding: 0.85rem 1.5rem;
-  }
-
-  .transcription-text {
-    max-height: 300px;
-  }
-}
-
-/* Адаптация для очень больших экранов */
-@media (min-width: 1400px) {
-  .container {
-    max-width: 1000px;
-    padding: 2.5rem 2rem;
-    gap: 3rem;
-  }
+@media (max-width: 760px) {
+  .layout.with-panel { grid-template-columns: 1fr; }
+  .panel { border-right: none; border-bottom: 1px solid var(--border); }
 }
 </style>
-<style>
-* {
-  margin: 0;
-  padding: 0;
-  box-sizing: border-box;
-}
 
-html,
-body,
-#app {
-  height: 100vh;
-  width: 100vw;
-  overflow: hidden;
-}
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body, #app { height: 100vh; width: 100vw; overflow: hidden; }
 
 :root {
+  --bg: #f4f5f7;
+  --surface: #ffffff;
+  --fg: #1a1a1a;
+  --muted: #6b7280;
+  --border: #e3e6eb;
+  --accent: #646cff;
+  --accent-2: #535bf2;
+  --accent-soft: rgba(100, 108, 255, 0.1);
+  --accent-shadow: rgba(100, 108, 255, 0.3);
+
   font-family: Inter, Avenir, Helvetica, Arial, sans-serif;
   font-size: 16px;
-  line-height: 24px;
-  font-weight: 400;
-
-  color: #0f0f0f;
-  background-color: #f6f6f6;
-
-  font-synthesis: none;
-  text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
-  -webkit-text-size-adjust: 100%;
-}
-
-.container {
-  margin: 0;
-  padding-top: 10vh;
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-  text-align: center;
-}
-
-.logo {
-  height: 6em;
-  padding: 1.5em;
-  will-change: filter;
-  transition: 0.75s;
-}
-
-.logo.tauri:hover {
-  filter: drop-shadow(0 0 2em #24c8db);
-}
-
-.row {
-  display: flex;
-  justify-content: center;
-}
-
-a {
-  font-weight: 500;
-  color: #646cff;
-  text-decoration: inherit;
-}
-
-a:hover {
-  color: #535bf2;
-}
-
-h1 {
-  text-align: center;
-}
-
-input,
-button {
-  border-radius: 8px;
-  border: 1px solid transparent;
-  padding: 0.6em 1.2em;
-  font-size: 1em;
-  font-weight: 500;
-  font-family: inherit;
-  color: #0f0f0f;
-  background-color: #ffffff;
-  transition: border-color 0.25s;
-  box-shadow: 0 2px 2px rgba(0, 0, 0, 0.2);
-}
-
-button {
-  cursor: pointer;
-}
-
-button:hover {
-  border-color: #396cd8;
-}
-button:active {
-  border-color: #396cd8;
-  background-color: #e8e8e8;
-}
-
-input,
-button {
-  outline: none;
-}
-
-#greet-input {
-  margin-right: 5px;
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
-    color: #f6f6f6;
-    background-color: #2f2f2f;
-  }
-
-  a:hover {
-    color: #24c8db;
-  }
-
-  input,
-  button {
-    color: #ffffff;
-    background-color: #0f0f0f98;
-  }
-  button:active {
-    background-color: #0f0f0f69;
+    --bg: #1c1c1e;
+    --surface: #2a2a2e;
+    --fg: #f2f2f7;
+    --muted: #9a9aa0;
+    --border: #3a3a3e;
+    --accent: #7c83ff;
+    --accent-2: #646cff;
+    --accent-soft: rgba(124, 131, 255, 0.15);
+    --accent-shadow: rgba(124, 131, 255, 0.3);
   }
 }
 </style>

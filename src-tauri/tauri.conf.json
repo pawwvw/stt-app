@@ -34,8 +34,7 @@
       "icons/icon.ico"
     ],
     "resources": [
-      "whisher/whisper-cli",
-      "whisher/whisper-cli.exe",
+      "whisher/whisper-cli*",
       "whisher/*.dll"
     ]
   }
