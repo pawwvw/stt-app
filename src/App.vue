@@ -2,6 +2,7 @@
 import { ref, computed, onMounted, onUnmounted } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { writeTextFile } from "@tauri-apps/plugin-fs";
 
@@ -66,6 +67,21 @@ const transcriptionSrt = ref("");
 const error = ref("");
 const notice = ref("");
 const showSettings = ref(true);
+const isDragOver = ref(false);
+
+const AUDIO_EXT = ["mp3", "wav", "ogg", "m4a", "webm", "flac", "aac"];
+function acceptDroppedFile(path: string) {
+  const ext = path.split(".").pop()?.toLowerCase() || "";
+  if (!AUDIO_EXT.includes(ext)) {
+    error.value = "Неподдерживаемый формат файла. Допустимы: " + AUDIO_EXT.join(", ").toUpperCase();
+    return;
+  }
+  audioFilePath.value = path;
+  audioFileName.value = path.split(/[/\\]/).pop() || "audio";
+  error.value = "";
+  notice.value = "";
+  transcription.value = "";
+}
 
 const transcribePercent = ref(0);
 const transcribeStage = ref<string>("transcribe");
@@ -75,6 +91,7 @@ const stageLabel = computed(() =>
 
 let unlistenProgress: UnlistenFn | null = null;
 let unlistenTranscribe: UnlistenFn | null = null;
+let unlistenDrop: UnlistenFn | null = null;
 
 const installedModels = computed(() => models.value.filter((m) => m.installed));
 const hasInstalledModel = computed(() => installedModels.value.length > 0);
@@ -96,10 +113,24 @@ onMounted(async () => {
     transcribeStage.value = e.payload.stage;
     transcribePercent.value = e.payload.percent;
   });
+  // Перетаскивание файла в окно
+  unlistenDrop = await getCurrentWebview().onDragDropEvent((event) => {
+    const t = event.payload.type;
+    if (t === "over" || t === "enter") {
+      isDragOver.value = true;
+    } else if (t === "drop") {
+      isDragOver.value = false;
+      const paths = (event.payload as { paths?: string[] }).paths;
+      if (paths && paths.length > 0) acceptDroppedFile(paths[0]);
+    } else {
+      isDragOver.value = false;
+    }
+  });
 });
 onUnmounted(() => {
   if (unlistenProgress) unlistenProgress();
   if (unlistenTranscribe) unlistenTranscribe();
+  if (unlistenDrop) unlistenDrop();
 });
 
 async function refreshModels() {
@@ -377,14 +408,14 @@ function baseName(): string {
         </div>
 
         <template v-else>
-          <div v-if="!audioFilePath" class="drop-zone" @click="openFileDialog">
+          <div v-if="!audioFilePath" class="drop-zone" :class="{ 'drag-over': isDragOver }" @click="openFileDialog">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"
               stroke-linecap="round" stroke-linejoin="round">
               <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
               <polyline points="17 8 12 3 7 8" />
               <line x1="12" x2="12" y1="3" y2="15" />
             </svg>
-            <h3>Выберите аудиофайл</h3>
+            <h3>{{ isDragOver ? "Отпустите файл" : "Перетащите или выберите аудиофайл" }}</h3>
             <p>MP3, WAV, OGG, M4A, FLAC, AAC, WEBM</p>
           </div>
 
@@ -651,6 +682,13 @@ function baseName(): string {
   transform: translateY(-3px);
   box-shadow: 0 16px 40px -16px var(--accent-shadow);
 }
+.drop-zone.drag-over {
+  border-color: var(--accent);
+  border-style: solid;
+  background: var(--accent-soft);
+  box-shadow: 0 0 0 4px var(--accent-ring), 0 16px 40px -16px var(--accent-shadow);
+  transform: scale(1.01);
+}
 .drop-zone h3 { margin: 0.5rem 0 0; }
 .drop-zone p { margin: 0; color: var(--muted); font-size: 0.88rem; }
 
@@ -758,6 +796,19 @@ function baseName(): string {
 * { margin: 0; padding: 0; box-sizing: border-box; }
 html, body, #app { height: 100vh; width: 100vw; overflow: hidden; }
 
+/* тонкий стилизованный скроллбар */
+*::-webkit-scrollbar { width: 10px; height: 10px; }
+*::-webkit-scrollbar-track { background: transparent; }
+*::-webkit-scrollbar-thumb {
+  background: var(--scroll-thumb);
+  border-radius: 8px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+*::-webkit-scrollbar-thumb:hover { background: var(--scroll-thumb-hover); background-clip: padding-box; }
+*::-webkit-scrollbar-corner { background: transparent; }
+* { scrollbar-width: thin; scrollbar-color: var(--scroll-thumb) transparent; }
+
 :root {
   --bg: #f6f7fb;
   --surface: #ffffff;
@@ -774,6 +825,8 @@ html, body, #app { height: 100vh; width: 100vw; overflow: hidden; }
   --glow-1: rgba(109, 94, 252, 0.14);
   --glow-2: rgba(168, 85, 247, 0.12);
   --shadow-sm: 0 2px 10px -4px rgba(15, 18, 34, 0.12);
+  --scroll-thumb: rgba(15, 18, 34, 0.18);
+  --scroll-thumb-hover: rgba(15, 18, 34, 0.32);
 
   font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
   font-size: 16px;
@@ -798,6 +851,8 @@ html, body, #app { height: 100vh; width: 100vw; overflow: hidden; }
     --glow-1: rgba(139, 125, 255, 0.16);
     --glow-2: rgba(192, 132, 252, 0.13);
     --shadow-sm: 0 2px 12px -4px rgba(0, 0, 0, 0.5);
+    --scroll-thumb: rgba(255, 255, 255, 0.16);
+    --scroll-thumb-hover: rgba(255, 255, 255, 0.3);
   }
 }
 </style>

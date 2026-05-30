@@ -6,6 +6,18 @@ use serde::{Deserialize, Serialize};
 use tauri::{Manager, Emitter};
 use futures_util::StreamExt;
 
+/// Скрывает чёрное окно консоли при запуске дочерних процессов на Windows.
+/// На остальных ОС ничего не делает.
+fn hidden(mut cmd: Command) -> Command {
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    cmd
+}
+
 // ============================================================================
 // Структуры данных
 // ============================================================================
@@ -251,7 +263,8 @@ fn denoise_audio(ffmpeg: &PathBuf, input: &str) -> Option<PathBuf> {
     // loudnorm — нормализация громкости (EBU R128)
     let filter = "afftdn=nf=-25,highpass=f=80,lowpass=f=8000,loudnorm";
 
-    let status = Command::new(ffmpeg)
+    let mut cmd = hidden(Command::new(ffmpeg));
+    let status = cmd
         .args([
             "-y",
             "-i", input,
@@ -353,7 +366,8 @@ async fn transcribe_audio(
 
     // ---- Шаг 2: запускаем whisper-cli и стримим прогресс из stderr ----
     // Флаг -pp печатает строки вида "...progress = NN%" в stderr.
-    let child = Command::new(&cli)
+    let mut cmd = hidden(Command::new(&cli));
+    let child = cmd
         .arg("-f").arg(&input_for_whisper)
         .arg("-m").arg(&model_path)
         .arg("-l").arg(&lang)
