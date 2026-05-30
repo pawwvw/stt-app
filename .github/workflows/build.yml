@@ -81,12 +81,13 @@ jobs:
         run: |
           git clone --depth 1 https://github.com/ggml-org/whisper.cpp.git
           cd whisper.cpp
-          cmake -B build -DCMAKE_BUILD_TYPE=Release -DWHISPER_BUILD_EXAMPLES=ON
+          # Статическая сборка: whisper-cli самодостаточен, .so не нужны
+          cmake -B build -DCMAKE_BUILD_TYPE=Release -DWHISPER_BUILD_EXAMPLES=ON -DBUILD_SHARED_LIBS=OFF
           cmake --build build -j$(nproc) --config Release
           mkdir -p ../src-tauri/whisher
           cp build/bin/whisper-cli ../src-tauri/whisher/whisper-cli
-          # Сопутствующие shared-библиотеки
-          find build -name "*.so*" -exec cp {} ../src-tauri/whisher/ \;
+          # На случай динамической сборки — подбираем сопутствующие .so, если они есть
+          find build -name "*.so*" -exec cp {} ../src-tauri/whisher/ \; 2>/dev/null || true
           chmod +x ../src-tauri/whisher/whisper-cli
           cd ..
           rm -rf whisper.cpp
@@ -97,13 +98,16 @@ jobs:
         run: |
           git clone --depth 1 https://github.com/ggml-org/whisper.cpp.git
           cd whisper.cpp
+          # Статическая сборка: whisper-cli самодостаточен, .dylib не нужны
           cmake -B build -DCMAKE_BUILD_TYPE=Release \
             -DWHISPER_BUILD_EXAMPLES=ON \
+            -DBUILD_SHARED_LIBS=OFF \
             -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64"
           cmake --build build -j$(sysctl -n hw.ncpu) --config Release
           mkdir -p ../src-tauri/whisher
           cp build/bin/whisper-cli ../src-tauri/whisher/whisper-cli
-          find build -name "*.dylib" -exec cp {} ../src-tauri/whisher/ \;
+          # На случай динамической сборки — подбираем .dylib, если они есть
+          find build -name "*.dylib" -exec cp {} ../src-tauri/whisher/ \; 2>/dev/null || true
           chmod +x ../src-tauri/whisher/whisper-cli
           cd ..
           rm -rf whisper.cpp
@@ -186,14 +190,36 @@ jobs:
       #  держать плейсхолдеры в репозитории и не ломать локальный cargo check)
       # ===============================================================
 
-      - name: Patch tauri.conf resources (Linux/macOS)
-        if: matrix.platform != 'windows-latest'
+      - name: Patch tauri.conf resources (Linux)
+        if: matrix.platform == 'ubuntu-22.04'
         run: |
           cd src-tauri
+          # На Linux включаем только реально существующие файлы.
+          # .so может не быть (статическая сборка) — добавляем glob только если файлы есть.
+          res='["whisher/whisper-cli*","whisher/ffmpeg*"]'
+          if ls whisher/*.so* >/dev/null 2>&1; then
+            res='["whisher/whisper-cli*","whisher/*.so*","whisher/ffmpeg*"]'
+          fi
           tmp=$(mktemp)
-          jq '.bundle.resources = ["whisher/whisper-cli*","whisher/*.dll","whisher/*.so*","whisher/*.dylib","whisher/ffmpeg*"]' tauri.conf.json > "$tmp"
+          jq ".bundle.resources = $res" tauri.conf.json > "$tmp"
           mv "$tmp" tauri.conf.json
           echo "Обновлённые resources:"; jq '.bundle.resources' tauri.conf.json
+          echo "Содержимое whisher:"; ls -la whisher
+
+      - name: Patch tauri.conf resources (macOS)
+        if: matrix.platform == 'macos-latest'
+        run: |
+          cd src-tauri
+          # На macOS .dylib может отсутствовать (статическая сборка) — добавляем glob только при наличии.
+          res='["whisher/whisper-cli*","whisher/ffmpeg*"]'
+          if ls whisher/*.dylib >/dev/null 2>&1; then
+            res='["whisher/whisper-cli*","whisher/*.dylib","whisher/ffmpeg*"]'
+          fi
+          tmp=$(mktemp)
+          jq ".bundle.resources = $res" tauri.conf.json > "$tmp"
+          mv "$tmp" tauri.conf.json
+          echo "Обновлённые resources:"; jq '.bundle.resources' tauri.conf.json
+          echo "Содержимое whisher:"; ls -la whisher
 
       - name: Patch tauri.conf resources (Windows)
         if: matrix.platform == 'windows-latest'
